@@ -1,7 +1,8 @@
+'use client';
+
 import { useState, useEffect, useMemo } from 'react';
 import { Calendar, TrendingUp, CheckCircle2, XCircle, AlertTriangle, Loader2, Search, ChevronDown, ChevronUp, RotateCcw, ArrowRight, Sparkles } from 'lucide-react';
 
-// ─── Design tokens ─────────────────────────────────────────
 const THEME = {
   bg: '#F5EFE3',
   paper: '#FAF6EC',
@@ -9,7 +10,7 @@ const THEME = {
   inkSoft: '#4A4238',
   inkFaint: '#8A8075',
   rule: '#D9CFBD',
-  accent: '#C8432E',        // terracotta — primary action / branding
+  accent: '#C8432E',
   accentSoft: '#E8DAD0',
   green: '#2C5F2D',
   greenSoft: '#D7E4D0',
@@ -75,7 +76,6 @@ const FONT_STYLES = `
   }
 `;
 
-// ─── Date helpers ──────────────────────────────────────────
 const toISODate = (d) => d.toISOString().slice(0, 10);
 const fmtDate = (d) => d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
 const fmtDateLong = (d) => d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
@@ -108,17 +108,18 @@ const subtractBusinessDays = (date, days) => {
 const fmtMoney = (n) =>
   new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n || 0);
 
-// Default next bill date = 1st of next month
 const defaultNextBillDate = () => {
   const d = new Date();
   const next = new Date(d.getFullYear(), d.getMonth() + 1, 1);
   return toISODate(next);
 };
 
-// ─── Main component ───────────────────────────────────────
 export default function CashCycleTool() {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const today = useMemo(() => {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }, []);
 
   const [cashAmount, setCashAmount] = useState('');
   const [nextBillDate, setNextBillDate] = useState(defaultNextBillDate());
@@ -131,35 +132,28 @@ export default function CashCycleTool() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
 
-  // Load persisted settings
   useEffect(() => {
-    (async () => {
-      try {
-        const bufRes = await window.storage.get('settings:safetyBuffer');
-        if (bufRes?.value) setSafetyBuffer(Number(bufRes.value));
-      } catch (_) {}
-      try {
-        const histRes = await window.storage.get('history:cycles');
-        if (histRes?.value) setHistory(JSON.parse(histRes.value));
-      } catch (_) {}
-      setSettingsLoaded(true);
-    })();
+    try {
+      const buf = localStorage.getItem('settings:safetyBuffer');
+      if (buf) setSafetyBuffer(Number(buf));
+    } catch (_) {}
+    try {
+      const hist = localStorage.getItem('history:cycles');
+      if (hist) setHistory(JSON.parse(hist));
+    } catch (_) {}
+    setSettingsLoaded(true);
   }, []);
 
-  // Persist safety buffer
   useEffect(() => {
     if (!settingsLoaded) return;
-    window.storage.set('settings:safetyBuffer', String(safetyBuffer)).catch(() => {});
+    try {
+      localStorage.setItem('settings:safetyBuffer', String(safetyBuffer));
+    } catch (_) {}
   }, [safetyBuffer, settingsLoaded]);
 
-  // ─── Derived values ─────────────────────────────────
-  const billDateObj = useMemo(() => {
-    const d = new Date(nextBillDate + 'T00:00:00');
-    return d;
-  }, [nextBillDate]);
-
+  const billDateObj = useMemo(() => new Date(nextBillDate + 'T00:00:00'), [nextBillDate]);
   const sellByDate = useMemo(() => subtractBusinessDays(billDateObj, 3), [billDateObj]);
-  const holdBusinessDays = useMemo(() => businessDaysBetween(today, sellByDate), [sellByDate]);
+  const holdBusinessDays = useMemo(() => businessDaysBetween(today, sellByDate), [today, sellByDate]);
 
   const cycleType = useMemo(() => {
     if (holdBusinessDays < 7) return 'short';
@@ -167,7 +161,6 @@ export default function CashCycleTool() {
     return 'full';
   }, [holdBusinessDays]);
 
-  // Force allocation to match cycle type
   useEffect(() => {
     if (cycleType === 'short') setAlloc({ tier1: 100, tier2: 0, tier3: 0 });
     else if (cycleType === 'medium') setAlloc({ tier1: 70, tier2: 30, tier3: 0 });
@@ -179,76 +172,28 @@ export default function CashCycleTool() {
   const tier2Dollars = Math.round((cashNum * alloc.tier2) / 100);
   const tier3Dollars = cashNum - tier1Dollars - tier2Dollars;
 
-  // ─── Ticker analysis via Claude API ─────────────────
   const analyzeTicker = async (idx) => {
     const ticker = tickers[idx].trim().toUpperCase();
     if (!ticker) return;
 
     setAnalyzing((prev) => prev.map((v, i) => (i === idx ? true : v)));
 
-    const prompt = `Analyze the stock ticker ${ticker} for a SHORT-TERM HOLD strategy.
-
-Context:
-- Purchase date: ${toISODate(today)}
-- Target sell date: ${toISODate(sellByDate)}
-- Hold length: ${holdBusinessDays} business days
-- Strategy: buy today, sell before ${toISODate(sellByDate)}
-
-Use web search to find current information. Evaluate these criteria:
-
-1. MARKET CAP: Must be >$10B (large cap reduces volatility)
-2. BETA: Should be <1.3 (lower market sensitivity)
-3. EARNINGS: The next earnings report MUST NOT fall between ${toISODate(today)} and ${toISODate(sellByDate)} — if it does, this is a FAIL
-4. 52-WEEK POSITION: "middle" (mid-range) is ideal; "near-high" (chase risk) or "near-low" (value trap signal) are concerns
-5. NEWS FLAGS: Any recent news about lawsuits, SEC investigations, guidance cuts, active M&A, executive departures, major product failures, or material uncertainty
-
-Also note the company's basic fundamental health (profitability, debt level, cash position) in one short phrase.
-
-Return ONLY valid JSON, no markdown code fences, no preamble:
-{
-  "ticker": "${ticker}",
-  "companyName": "string",
-  "marketCap": "string like $150B",
-  "marketCapPass": boolean,
-  "beta": number or null,
-  "betaPass": boolean,
-  "nextEarningsDate": "YYYY-MM-DD or 'outside window' or 'unknown'",
-  "earningsPass": boolean,
-  "fiftyTwoWeekPosition": "near-high" | "middle" | "near-low",
-  "positionPass": boolean,
-  "newsFlags": ["flag1", "flag2"] or [],
-  "newsPass": boolean,
-  "fundamentalsNote": "short phrase",
-  "passedCount": integer 0-5,
-  "recommendation": "BUY" | "CAUTION" | "AVOID",
-  "reasoning": "2-3 sentence summary"
-}`;
-
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const response = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 1500,
-          messages: [{ role: 'user', content: prompt }],
-          tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+          ticker,
+          today: toISODate(today),
+          sellByDate: toISODate(sellByDate),
+          holdBusinessDays,
         }),
       });
 
       const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
 
-      if (data.error) throw new Error(data.error.message || 'API error');
-
-      const textBlocks = (data.content || []).filter((b) => b.type === 'text');
-      const fullText = textBlocks.map((b) => b.text).join('\n').trim();
-      const cleaned = fullText.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
-
-      // Extract JSON if wrapped in other text
-      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-      const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleaned);
-
-      setAnalyses((prev) => prev.map((v, i) => (i === idx ? parsed : v)));
+      setAnalyses((prev) => prev.map((v, i) => (i === idx ? data : v)));
     } catch (err) {
       setAnalyses((prev) =>
         prev.map((v, i) => (i === idx ? { error: err.message || 'Analysis failed', ticker } : v))
@@ -258,7 +203,7 @@ Return ONLY valid JSON, no markdown code fences, no preamble:
     setAnalyzing((prev) => prev.map((v, i) => (i === idx ? false : v)));
   };
 
-  const logCycle = async () => {
+  const logCycle = () => {
     const entry = {
       id: Date.now(),
       buyDate: toISODate(today),
@@ -272,15 +217,15 @@ Return ONLY valid JSON, no markdown code fences, no preamble:
     const updated = [entry, ...history].slice(0, 50);
     setHistory(updated);
     try {
-      await window.storage.set('history:cycles', JSON.stringify(updated));
+      localStorage.setItem('history:cycles', JSON.stringify(updated));
     } catch (_) {}
   };
 
-  const clearHistory = async () => {
+  const clearHistory = () => {
     if (!confirm('Clear all cycle history?')) return;
     setHistory([]);
     try {
-      await window.storage.delete('history:cycles');
+      localStorage.removeItem('history:cycles');
     } catch (_) {}
   };
 
@@ -294,13 +239,11 @@ Return ONLY valid JSON, no markdown code fences, no preamble:
     ? validAnalyses.reduce((best, curr) => (curr.passedCount > (best?.passedCount || -1) ? curr : best), null)
     : null;
 
-  // ─── Render ─────────────────────────────────────────
   return (
     <div className="min-h-screen font-body grain" style={{ background: THEME.bg, color: THEME.ink }}>
       <style>{FONT_STYLES}</style>
 
       <div className="max-w-3xl mx-auto px-6 py-10">
-        {/* HEADER */}
         <header className="mb-10">
           <div className="flex items-baseline justify-between mb-2">
             <div>
@@ -321,7 +264,6 @@ Return ONLY valid JSON, no markdown code fences, no preamble:
           </div>
         </header>
 
-        {/* ── SECTION 1: SITUATION ──────────────────────── */}
         <Section number="01" title="Situation">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
             <Field label="Cash to deploy">
@@ -372,10 +314,10 @@ Return ONLY valid JSON, no markdown code fences, no preamble:
               </div>
               <div className="mt-4 text-sm font-body" style={{ color: THEME.inkSoft }}>
                 {cycleType === 'short' && (
-                  <>Hold window is too short for equity risk. Deploy to MMF only — you'll still earn short-term yield.</>
+                  <>Hold window is too short for equity risk. Deploy to MMF only — you&apos;ll still earn short-term yield.</>
                 )}
                 {cycleType === 'medium' && (
-                  <>Medium window — MMF plus a broad ETF position. Single-stock risk isn't worth it for this hold length.</>
+                  <>Medium window — MMF plus a broad ETF position. Single-stock risk isn&apos;t worth it for this hold length.</>
                 )}
                 {cycleType === 'full' && (
                   <>Full window. All three tiers available, including an optional individual pick.</>
@@ -385,7 +327,6 @@ Return ONLY valid JSON, no markdown code fences, no preamble:
           )}
         </Section>
 
-        {/* ── SECTION 2: ALLOCATION ─────────────────────── */}
         {cashNum > 0 && (
           <Section number="02" title="Allocation">
             <div className="space-y-0">
@@ -430,7 +371,6 @@ Return ONLY valid JSON, no markdown code fences, no preamble:
           </Section>
         )}
 
-        {/* ── SECTION 3: CANDIDATE ANALYSIS ─────────────── */}
         {cashNum > 0 && alloc.tier3 > 0 && (
           <Section
             number="03"
@@ -472,7 +412,6 @@ Return ONLY valid JSON, no markdown code fences, no preamble:
               ))}
             </div>
 
-            {/* Analysis results */}
             <div className="mt-6 space-y-4">
               {analyses.map((a, idx) =>
                 a ? <AnalysisCard key={idx} analysis={a} isBest={bestPick && a.ticker === bestPick.ticker && validAnalyses.length > 1} /> : null
@@ -491,7 +430,6 @@ Return ONLY valid JSON, no markdown code fences, no preamble:
           </Section>
         )}
 
-        {/* ── SECTION 4: EXECUTION ──────────────────────── */}
         {cashNum > 0 && (
           <Section number="04" title="Execution">
             <div className="space-y-2 font-mono text-sm">
@@ -516,7 +454,6 @@ Return ONLY valid JSON, no markdown code fences, no preamble:
           </Section>
         )}
 
-        {/* ── HISTORY ───────────────────────────────────── */}
         {history.length > 0 && (
           <div className="mt-12">
             <button
@@ -551,7 +488,6 @@ Return ONLY valid JSON, no markdown code fences, no preamble:
           </div>
         )}
 
-        {/* Footer */}
         <div className="mt-16 text-xs font-body italic text-center" style={{ color: THEME.inkFaint }}>
           Not financial advice. The tool screens — you decide. Stock analyses use live web search and may be incomplete or inaccurate.
         </div>
@@ -560,7 +496,6 @@ Return ONLY valid JSON, no markdown code fences, no preamble:
   );
 }
 
-// ─── Sub-components ────────────────────────────────────────
 function Section({ number, title, children, action }) {
   return (
     <section className="mb-10 fade-in">
@@ -699,7 +634,6 @@ function AnalysisCard({ analysis, isBest }) {
 
   return (
     <div className="rounded-lg fade-in" style={{ background: THEME.paper, border: `2px solid ${isBest ? THEME.accent : THEME.rule}` }}>
-      {/* Header */}
       <div className="px-5 py-4 flex items-center justify-between" style={{ borderBottom: `1px solid ${THEME.rule}` }}>
         <div>
           <div className="flex items-center gap-3">
@@ -722,7 +656,6 @@ function AnalysisCard({ analysis, isBest }) {
         </div>
       </div>
 
-      {/* Criteria */}
       <div className="px-5 py-3 grid grid-cols-1 md:grid-cols-2 gap-x-6">
         <Check pass={analysis.marketCapPass} label="Market cap >$10B" value={analysis.marketCap || '—'} />
         <Check pass={analysis.betaPass} label="Beta <1.3" value={analysis.beta !== null && analysis.beta !== undefined ? analysis.beta.toFixed(2) : '—'} />
@@ -733,7 +666,6 @@ function AnalysisCard({ analysis, isBest }) {
         </div>
       </div>
 
-      {/* Reasoning */}
       <div className="px-5 py-3 font-body text-sm italic" style={{ background: THEME.bg, color: THEME.inkSoft, borderTop: `1px solid ${THEME.rule}` }}>
         {analysis.reasoning}
         {analysis.fundamentalsNote && (
